@@ -28,8 +28,28 @@ class _ClamAVConfig(_BaseConfig):
         if not installed_packages:
             print("Installing ClamAV packages...")
             self._install_clamav_packages()
+            
+            # Check if package installation created any configs before DNS fix
+            logger.info("DEBUG: Checking for configs created by package installation...")
+            if os.path.exists(self.freshclam_config_path):
+                logger.warning(f"DEBUG: Package installation created {self.freshclam_config_path}")
+                with open(self.freshclam_config_path, 'r') as f:
+                    content = f.read()
+                    for i, line in enumerate(content.split('\n'), 1):
+                        if 'UpdateLogFile' in line:
+                            logger.warning(f"DEBUG: Package config Line {i}: {line}")
+            else:
+                logger.info("DEBUG: No freshclam config created by packages")
+            
             # Fix any DNS issues caused by ClamAV installation
             self._fix_dns_configuration()
+            
+            # Check if DNS fix affected any configs
+            logger.info("DEBUG: Checking configs after DNS fix...")
+            if os.path.exists(self.freshclam_config_path):
+                logger.info(f"DEBUG: Config still exists after DNS fix: {self.freshclam_config_path}")
+            else:
+                logger.info("DEBUG: No config exists after DNS fix")
         else:
             print(f"ClamAV packages already installed: {', '.join(installed_packages)}")
         
@@ -153,9 +173,10 @@ class _ClamAVConfig(_BaseConfig):
 
     def _configure_clamav_files(self) -> None:
         """Configure ClamAV configuration files."""
-        # Ensure directories exist
+        # Ensure directories exist (including fallback log directory)
         os.makedirs("/etc/clamav", exist_ok=True)
         os.makedirs("/var/lib/clamav", exist_ok=True)
+        os.makedirs("/var/log/clamav", exist_ok=True)  # Fallback for system defaults
         
         # Set proper ownership and permissions for directories
         try:
@@ -167,25 +188,29 @@ class _ClamAVConfig(_BaseConfig):
             # Set ownership and make directories writable
             os.chown("/var/lib/clamav", clamav_uid, clamav_gid)
             os.chmod("/var/lib/clamav", 0o755)
+            os.chown("/var/log/clamav", clamav_uid, clamav_gid)
+            os.chmod("/var/log/clamav", 0o755)
             
-            # Create freshclam log file with proper ownership
-            freshclam_log = "/var/lib/clamav/freshclam.log"
-            if not os.path.exists(freshclam_log):
-                with open(freshclam_log, 'w') as f:
-                    f.write("# ClamAV freshclam log file\n")
-                os.chown(freshclam_log, clamav_uid, clamav_gid)
-                os.chmod(freshclam_log, 0o644)
+            # Create freshclam log files with proper ownership (both locations as fallback)
+            for log_path in ["/var/lib/clamav/freshclam.log", "/var/log/clamav/freshclam.log"]:
+                if not os.path.exists(log_path):
+                    with open(log_path, 'w') as f:
+                        f.write("# ClamAV freshclam log file\n")
+                    os.chown(log_path, clamav_uid, clamav_gid)
+                    os.chmod(log_path, 0o644)
                 
         except (KeyError, OSError) as e:
             logger.warning(f"Could not set clamav ownership: {e}")
             # As fallback, make directories world-writable for manual operation
             try:
                 os.chmod("/var/lib/clamav", 0o777)
-                logger.info("Set /var/lib/clamav to world-writable as fallback")
+                os.chmod("/var/log/clamav", 0o777)
+                logger.info("Set ClamAV directories to world-writable as fallback")
             except Exception:
                 pass
         
-        # Configure freshclam.conf if it doesn't exist or is minimal
+        # Remove any conflicting configuration files and setup our custom configs
+        self._cleanup_conflicting_configs()
         self._setup_freshclam_config()
         
         # Configure clamd.conf if it doesn't exist or is minimal
@@ -194,9 +219,52 @@ class _ClamAVConfig(_BaseConfig):
         # Disable automatic daemon startup
         self._disable_automatic_services()
 
+    def _cleanup_conflicting_configs(self) -> None:
+        """Remove or backup conflicting ClamAV configuration files."""
+        try:
+            # List of potential conflicting config locations
+            conflicting_configs = [
+                "/etc/clamav/freshclam.conf.dpkg-dist",
+                "/etc/clamav/freshclam.conf.orig",
+                "/etc/clamav/clamd.conf.dpkg-dist", 
+                "/etc/clamav/clamd.conf.orig"
+            ]
+            
+            for config_file in conflicting_configs:
+                if os.path.exists(config_file):
+                    backup_name = f"{config_file}.nilrt-backup"
+                    if not os.path.exists(backup_name):
+                        os.rename(config_file, backup_name)
+                        logger.info(f"Moved conflicting config {config_file} to {backup_name}")
+                    else:
+                        os.remove(config_file)
+                        logger.info(f"Removed conflicting config {config_file}")
+                        
+        except Exception as e:
+            logger.warning(f"Could not cleanup conflicting configs: {e}")
+
     def _setup_freshclam_config(self) -> None:
         """Setup freshclam configuration file."""
+        # First, check and remove any existing config files that might conflict
+        potential_configs = [
+            "/etc/clamav/freshclam.conf",
+            "/usr/local/etc/freshclam.conf", 
+            "/etc/freshclam.conf"
+        ]
+        
+        for config_path in potential_configs:
+            if config_path != self.freshclam_config_path and os.path.exists(config_path):
+                try:
+                    backup_path = f"{config_path}.nilrt-disabled"
+                    os.rename(config_path, backup_path)
+                    logger.info(f"Disabled conflicting config: {config_path} -> {backup_path}")
+                except Exception as e:
+                    logger.warning(f"Could not disable config {config_path}: {e}")
+        
+        # Always overwrite existing configuration to ensure our settings take precedence
         freshclam_config_content = """# Freshclam configuration for NILRT (Manual mode)
+# This file overrides any system defaults
+# FORCE LOG PATH - DO NOT CHANGE THIS LINE
 DatabaseDirectory /var/lib/clamav
 UpdateLogFile /var/lib/clamav/freshclam.log
 LogVerbose yes
@@ -222,6 +290,21 @@ TestDatabases yes
                 f.write(freshclam_config_content)
             os.chmod(self.freshclam_config_path, 0o644)
             logger.info(f"Created freshclam configuration: {self.freshclam_config_path}")
+            
+            # Add debugging to verify what was written
+            logger.info("DEBUG: Verifying freshclam config contents...")
+            with open(self.freshclam_config_path, 'r') as f:
+                lines = f.readlines()
+                for i, line in enumerate(lines, 1):
+                    if 'UpdateLogFile' in line:
+                        logger.info(f"DEBUG: Line {i}: {line.strip()}")
+            
+            # Check if there are any other freshclam configs that might interfere
+            other_configs = ["/usr/local/etc/freshclam.conf", "/etc/freshclam.conf"]
+            for config in other_configs:
+                if os.path.exists(config):
+                    logger.warning(f"DEBUG: Found potential conflicting config: {config}")
+            
         except Exception as e:
             logger.error(f"Failed to create freshclam config: {e}")
 
@@ -331,8 +414,6 @@ MaxRecHWP3 16
         except Exception as e:
             logger.error(f"Failed to create clamd config: {e}")
 
-
-
     def _disable_automatic_services(self) -> None:
         """Disable automatic ClamAV services to ensure manual-only operation."""
         try:
@@ -421,8 +502,10 @@ MaxRecHWP3 16
                 # Try to restore from backup first
                 if os.path.exists(backup_path):
                     logger.info("Restoring DNS configuration from backup")
+                    logger.info("DEBUG: DNS fix - before shutil.copy2 operation")
                     import shutil
                     shutil.copy2(backup_path, resolv_conf_path)
+                    logger.info("DEBUG: DNS fix - after shutil.copy2 operation")
                 else:
                     # Create a functional resolv.conf with reliable DNS servers
                     logger.info("Creating new DNS configuration")
