@@ -86,6 +86,16 @@ class _ClamAVConfig(_BaseConfig):
         print("- To scan: sudo clamav-scan")
         print("- To update signatures: sudo freshclam")
         print("- To verify installation: nilrt-snac verify clamav")
+        print()
+        print("TO DEBUG LOG ISSUES:")
+        print("- Test explicit config: sudo freshclam --config-file=/etc/clamav/freshclam.conf --version")
+        print("- Check OUR log file: cat /var/lib/clamav/freshclam.log")
+        print("- Check SYSTEM log file: cat /var/log/clamav/freshclam.log")
+        print("- Check all freshclam configs: find /etc /usr -name 'freshclam.conf' 2>/dev/null")
+        print("- To use our config: sudo freshclam --config-file=/etc/clamav/freshclam.conf")
+        print()
+        print("NOTE: System may have multiple freshclam.conf files.")
+        print("Our configuration disables conflicting configs during installation.")
         print("="*60)
 
     def verify(self, args: argparse.Namespace) -> bool:
@@ -249,7 +259,8 @@ class _ClamAVConfig(_BaseConfig):
         potential_configs = [
             "/etc/clamav/freshclam.conf",
             "/usr/local/etc/freshclam.conf", 
-            "/etc/freshclam.conf"
+            "/etc/freshclam.conf",
+            "/usr/etc/freshclam.conf"  # System default that takes precedence
         ]
         
         for config_path in potential_configs:
@@ -304,6 +315,36 @@ TestDatabases yes
             for config in other_configs:
                 if os.path.exists(config):
                     logger.warning(f"DEBUG: Found potential conflicting config: {config}")
+            
+            # Test what config freshclam would actually use
+            try:
+                import subprocess
+                print("\n" + "="*50)
+                print("TESTING FRESHCLAM CONFIG DETECTION")
+                print("="*50)
+                print(f"Our config file: {self.freshclam_config_path}")
+                
+                # Test freshclam with explicit config file
+                result = subprocess.run(['freshclam', '--config-file=' + self.freshclam_config_path, '--version'], 
+                                      capture_output=True, text=True, timeout=10)
+                if result.returncode == 0:
+                    print("✓ Freshclam accepts our config with --config-file option")
+                else:
+                    print(f"✗ Freshclam rejects our config: {result.stderr}")
+                
+                # Test what config freshclam uses by default
+                print("\nTesting default freshclam behavior...")
+                result2 = subprocess.run(['freshclam', '--show-config-file'], 
+                                       capture_output=True, text=True, timeout=10)
+                if result2.returncode == 0:
+                    print(f"Freshclam default config: {result2.stdout.strip()}")
+                else:
+                    print("Freshclam doesn't support --show-config-file")
+                
+                print("="*50)
+                
+            except Exception as e:
+                logger.warning(f"Could not test freshclam config detection: {e}")
             
         except Exception as e:
             logger.error(f"Failed to create freshclam config: {e}")
