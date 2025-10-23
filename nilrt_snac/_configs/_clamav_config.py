@@ -89,8 +89,7 @@ class _ClamAVConfig(_BaseConfig):
         print()
         print("TO DEBUG LOG ISSUES:")
         print("- Test explicit config: sudo freshclam --config-file=/etc/clamav/freshclam.conf --version")
-        print("- Check OUR log file: cat /var/lib/clamav/freshclam.log")
-        print("- Check SYSTEM log file: cat /var/log/clamav/freshclam.log")
+        print("- Check log file: cat /var/log/clamav/freshclam.log")
         print("- Check all freshclam configs: find /etc /usr -name 'freshclam.conf' 2>/dev/null")
         print("- To use our config: sudo freshclam --config-file=/etc/clamav/freshclam.conf")
         print()
@@ -201,13 +200,13 @@ class _ClamAVConfig(_BaseConfig):
             os.chown("/var/log/clamav", clamav_uid, clamav_gid)
             os.chmod("/var/log/clamav", 0o755)
             
-            # Create freshclam log files with proper ownership (both locations as fallback)
-            for log_path in ["/var/lib/clamav/freshclam.log", "/var/log/clamav/freshclam.log"]:
-                if not os.path.exists(log_path):
-                    with open(log_path, 'w') as f:
-                        f.write("# ClamAV freshclam log file\n")
-                    os.chown(log_path, clamav_uid, clamav_gid)
-                    os.chmod(log_path, 0o644)
+            # Create freshclam log file with proper ownership (using standard system path)
+            log_path = "/var/log/clamav/freshclam.log"
+            if not os.path.exists(log_path):
+                with open(log_path, 'w') as f:
+                    f.write("# ClamAV freshclam log file\n")
+                os.chown(log_path, clamav_uid, clamav_gid)
+                os.chmod(log_path, 0o644)
                 
         except (KeyError, OSError) as e:
             logger.warning(f"Could not set clamav ownership: {e}")
@@ -260,7 +259,7 @@ class _ClamAVConfig(_BaseConfig):
             "/etc/clamav/freshclam.conf",
             "/usr/local/etc/freshclam.conf", 
             "/etc/freshclam.conf",
-            "/usr/etc/freshclam.conf"  # System default that takes precedence
+            "/usr/etc/freshclam.conf"
         ]
         
         for config_path in potential_configs:
@@ -275,9 +274,9 @@ class _ClamAVConfig(_BaseConfig):
         # Always overwrite existing configuration to ensure our settings take precedence
         freshclam_config_content = """# Freshclam configuration for NILRT (Manual mode)
 # This file overrides any system defaults
-# FORCE LOG PATH - DO NOT CHANGE THIS LINE
+# Using standard system log path for compatibility
 DatabaseDirectory /var/lib/clamav
-UpdateLogFile /var/lib/clamav/freshclam.log
+UpdateLogFile /var/log/clamav/freshclam.log
 LogVerbose yes
 LogSyslog no
 LogFacility LOG_LOCAL6
